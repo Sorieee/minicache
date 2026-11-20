@@ -417,7 +417,7 @@ mini-cache/
     └── run_tests.sh
 ```
 
-依赖:仅 libc + POSIX socket/epoll,不引入第三方库;目标平台 Linux(C99,`-Wall -Wextra -Werror`)。
+依赖:仅 libc + POSIX socket/epoll,不引入第三方库;目标平台 Linux(C17,`-Wall -Wextra -Werror`)。
 
 ---
 

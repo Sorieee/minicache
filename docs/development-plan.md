@@ -32,7 +32,7 @@ M0 工程骨架 ──▶ M1 网络层 ──▶ M2 RESP 协议 ──▶ M3 存
 
 任务清单:
 
-- [x] 建立目录结构(src/、tests/、docs/),CMakeLists.txt(`-Wall -Wextra -Werror -std=c99`)
+- [x] 建立目录结构(src/、tests/、docs/),CMakeLists.txt(`-Wall -Wextra -Werror -std=c17`)
 - [x] `util.c`:日志宏 `LOGD/LOGI/LOGW/LOGE`(带时间戳与级别)
 - [ ] sds 基础版:`sdsnewlen / sdscatlen / sdsfree / sdslen / sdsclear`(预分配翻倍策略)
 - [ ] 全局 `server` 结构体定义与 `initServerConfig()`
@@ -232,8 +232,8 @@ M0 工程骨架 ──▶ M1 网络层 ──▶ M2 RESP 协议 ──▶ M3 存
 
 ## 6. 编码约定
 
-- C99,依赖仅 libc + POSIX;禁止引入第三方库;
-- 编译选项:`-std=c99 -Wall -Wextra -Werror -O2`(debug 加 `-g -fsanitize=address,undefined`);
+- C17,依赖仅 libc + POSIX;禁止引入第三方库;
+- 编译选项:`-std=c17 -Wall -Wextra -Werror -O2`(debug 加 `-g -fsanitize=address,undefined`);
 - 命名:函数 `模块前缀_动作`(如 `dictAdd`、`addReplyBulk`),类型 `_t` 结尾或小驼峰结构体;
 - 每个 .h 有 include guard 与职责注释;公共函数头部注释说明参数与语义;
 - 错误处理约定:内存分配失败直接 `OOM()` 打日志并 abort(Redis 同款取舍)。

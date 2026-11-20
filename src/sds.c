@@ -18,7 +18,7 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <util.h>
+
 /* ---- 创建与释放 ---- */
 
 sds sdsempty(void)
@@ -41,6 +41,9 @@ sds sdsnewlen(const void *init, size_t initlen)
      * 4. buf[initlen] = '\0'(尾部哨兵,纯文本 API 依赖它);
      * 5. 返回 buf 地址。
      */
+    if (initlen > UINT32_MAX)   /* len/alloc 是 uint32_t:超限会静默截断,按 OOM 处理 */
+        oom("sdsnewlen");
+
     struct sdshdr *sh = malloc(offsetof(struct sdshdr, buf) + initlen + 1);
     if (sh == NULL)
         oom("sdsnewlen");
@@ -63,7 +66,7 @@ sds sdsnew(const char *init)
      * (提示:算好长度后委托 sdsnewlen)
      */
     size_t initlen = init == NULL ? 0 : strlen(init);
-    return sdsnewlen(init, initlen); 
+    return sdsnewlen(init, initlen);
 }
 
 sds sdsdup(const sds s)
@@ -71,8 +74,10 @@ sds sdsdup(const sds s)
     /* TODO: 深拷贝:新分配、与原串不共享内存
      * (提示:委托 sdsnewlen(s, sdslen(s)),二进制安全由 sdsnewlen 保证)
      */
-    (void)s;
-    return NULL; /* TODO: 实现后删除占位 */
+    if (s == NULL) {
+        return NULL;
+    }
+    return sdsnewlen(s, sdslen(s));
 }
 
 void sdsfree(sds s)
@@ -80,7 +85,10 @@ void sdsfree(sds s)
     /* TODO: 释放整块分配
      * s == NULL 直接返回(调用方习惯不判空);否则 free(SDS_HDR(s))。
      */
-    (void)s;
+    if (s == NULL) {
+        return;
+    }
+    free(SDS_HDR(s));
 }
 
 /* ---- 修改 ---- */
@@ -91,9 +99,28 @@ void sdsclear(sds s)
      * len 置 0,buf[0] 置 '\0',alloc 保持不变 ——
      * 省下的空间体现为 sdsavail() 变大,留给后续追加复用。
      */
-    (void)s;
+    SDS_HDR(s)->len = 0;
+    SDS_HDR(s)->buf[0] = '\0';
 }
 
+sds groupsds(sds s, size_t target) {
+    if (target > UINT32_MAX)        /* 与 sdsnewlen 同款:len/alloc 是 uint32_t */
+            oom("groupsds");
+
+    size_t newalloc = target < SDS_MAX_PREALLOC
+                              ? target * 2
+                              : target + SDS_MAX_PREALLOC;
+
+        /* realloc 返回新块首地址(= 新头部),不是 buf;旧指针随即失效,
+         * 旧内容整体原样迁移,无需搬移(空闲区不必初始化) */
+    struct sdshdr *sh = realloc(SDS_HDR(s), offsetof(struct sdshdr, buf) + newalloc + 1);
+    if (sh == NULL) {
+        oom("groupsds");
+    }
+    sh->alloc = newalloc;           /* len 在下面统一更新 */
+    s = sh->buf;
+    return s;
+}
 sds sdscatlen(sds s, const void *t, size_t len)
 {
     /* TODO: 追加 t[0..len) 到 s 末尾
@@ -109,20 +136,34 @@ sds sdscatlen(sds s, const void *t, size_t len)
      * 4. memcpy 到 buf 末尾(sdslen(s) 处),len 累加,buf[len] = '\0';
      * 5. 返回(可能已迁移的)新 buf 地址。
      */
-    (void)s;
-    (void)t;
-    (void)len;
-    return NULL; /* TODO: 实现后删除占位 */
+    if (len == 0) {
+        return s;               /* 不解引用 t */
+    }
+
+    size_t target = sdslen(s) + len;    /* 追加后的新总长 */
+    if (sdsavail(s) < len) {            /* 现有空间不足,先扩容 */
+        s = groupsds(s, target);
+        if (s == NULL) {
+            oom("sdscatlen");
+        }
+    }
+
+    /* 到这里保证 avail >= len:两个分支汇合,一条写路径 */
+    memcpy(s + sdslen(s), t, len);
+    SDS_HDR(s)->len = target;
+    s[target] = '\0';
+    return s;
 }
 
 sds sdscat(sds s, const char *t)
 {
-    /* TODO: sdscatlen 的 C 串便捷版
-     * 长度取 strlen(t),委托 sdscatlen。
+    /* 长度取 strlen(t),委托 sdscatlen。
      */
-    (void)s;
-    (void)t;
-    return NULL; /* TODO: 实现后删除占位 */
+     if (t == NULL) {
+        return s;
+     }
+    size_t tlen = strlen(t);
+    return sdscatlen(s, t, tlen); 
 }
 
 sds sdscpylen(sds s, const char *t, size_t len)

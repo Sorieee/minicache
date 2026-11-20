@@ -38,6 +38,10 @@ struct __attribute__((__packed__)) sdshdr {
  * 表达"buf 前面的部分是头部",与分配公式互为镜像 */
 #define SDS_HDR(s) ((struct sdshdr *)((s) - offsetof(struct sdshdr, buf)))
 
+/* 编译期锁住 packed 不变量:谁去掉 __packed__ 这里立即编译失败 */
+_Static_assert(sizeof(struct sdshdr) == offsetof(struct sdshdr, buf),
+               "sdshdr 必须保持 packed:sizeof 应等于头部大小(不含 buf)");
+
 /* 这两个函数只读头部、与内存管理无关,故内联在头文件里,
  * 让所有调用方 O(1) 取长度(设计目标,见 docs/design.md §2);
  * 其余方法(涉及分配的)在 sds.c 中实现 */

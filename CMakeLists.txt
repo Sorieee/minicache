@@ -11,9 +11,9 @@
 cmake_minimum_required(VERSION 3.13)
 project(mini-cache C)
 
-set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)  # 严格 -std=c99
+set(CMAKE_C_EXTENSIONS OFF)  # 严格 -std=c17
 
 # 与原 Makefile 一致:默认 -O2;DEBUG=1 时 -g -O0
 if(NOT CMAKE_BUILD_TYPE)
@@ -22,7 +22,7 @@ endif()
 set(CMAKE_C_FLAGS_RELEASE "-O2")
 set(CMAKE_C_FLAGS_DEBUG   "-g -O0")
 
-# -std=c99 严格模式下,POSIX 声明(gettimeofday/localtime_r、后续的 socket/epoll)
+# -std=c17 严格模式下,POSIX 声明(gettimeofday/localtime_r、后续的 socket/epoll)
 # 需要显式开启特性宏才会暴露
 add_compile_definitions(_POSIX_C_SOURCE=200809L)
 

@@ -29,8 +29,9 @@ log_level_t log_set_level(log_level_t level);
 void log_write(log_level_t level, const char *file, int line,
                const char *fmt, ...) __attribute__((format(printf, 4, 5)));
 
-/* 内存分配失败:打印日志并终止进程(与 Redis 同款取舍,见 docs/design.md §8) */
-void oom(const char *what);
+/* 内存分配失败:打印日志并终止进程(与 Redis 同款取舍,见 docs/design.md §8);
+ * _Noreturn 让调用方在 oom(...) 之后不必再做"指针可能为 NULL"的分析 */
+_Noreturn void oom(const char *what);
 
 /* 带时间戳与级别的日志宏;调用方不必写换行符与 %n 参数 */
 #define LOGD(...) log_write(LOG_LEVEL_DEBUG, __FILE__, __LINE__, __VA_ARGS__)
