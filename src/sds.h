@@ -71,7 +71,8 @@ sds sdsnewlen(const void *init, size_t initlen);
 /* 用 C 字符串创建(内部 strlen);init == NULL 等价于空串 */
 sds sdsnew(const char *init);
 
-/* 深拷贝一份,与原串不共享任何内存(dict 存 key 时常用) */
+/* 深拷贝一份,与原串不共享任何内存(dict 存 key 时常用);
+ * s == NULL 时返回 NULL */
 sds sdsdup(const sds s);
 
 /* 释放整块分配(头部 + 数据);s == NULL 时直接返回 */
@@ -84,10 +85,13 @@ void sdsclear(sds s);
 
 /* 把 t[0..len) 追加到 s 末尾;空间不足时按预分配策略扩容。
  * len == 0 时不解引用 t、原样返回。
+ * t 与 s 的内存不得重叠:扩容 realloc 会使旧 t 失效;
+ * 需要原地改写用 sdscpylen(按 memmove 语义处理重叠)。
  * 返回(可能已迁移的)新指针,调用方必须使用返回值 */
 sds sdscatlen(sds s, const void *t, size_t len);
 
-/* sdscatlen 的 C 字符串便捷版(长度取 strlen,t 必须 '\0' 结尾) */
+/* sdscatlen 的 C 字符串便捷版(长度取 strlen,t 必须 '\0' 结尾);
+ * t == NULL 时原样返回 s */
 sds sdscat(sds s, const char *t);
 
 /* 覆盖式拷贝:丢弃 s 原内容,写入 t[0..len)。

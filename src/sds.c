@@ -103,23 +103,28 @@ void sdsclear(sds s)
     SDS_HDR(s)->buf[0] = '\0';
 }
 
-sds groupsds(sds s, size_t target) {
-    if (target > UINT32_MAX)        /* 与 sdsnewlen 同款:len/alloc 是 uint32_t */
-            oom("groupsds");
+/* 扩容到至少能容纳 target 字节:小串翻倍、大串 +1MB(Redis 同款)。
+ * 仅本文件内部使用;只更新 alloc,len 由调用方按语义更新。
+ * 失败一律 oom,不返回 —— 调用方不必判 NULL。 */
+static sds groupsds(sds s, size_t target)
+{
+    /* len/alloc 是 uint32_t,且 target + SDS_MAX_PREALLOC 也不得溢出 */
+    if (target > UINT32_MAX - SDS_MAX_PREALLOC)
+        oom("groupsds");
 
     size_t newalloc = target < SDS_MAX_PREALLOC
-                              ? target * 2
-                              : target + SDS_MAX_PREALLOC;
+                          ? target * 2
+                          : target + SDS_MAX_PREALLOC;
 
-        /* realloc 返回新块首地址(= 新头部),不是 buf;旧指针随即失效,
-         * 旧内容整体原样迁移,无需搬移(空闲区不必初始化) */
-    struct sdshdr *sh = realloc(SDS_HDR(s), offsetof(struct sdshdr, buf) + newalloc + 1);
-    if (sh == NULL) {
+    /* realloc 返回新块首地址(= 新头部),不是 buf;旧指针随即失效,
+     * 旧内容整体原样迁移(空闲区不必初始化) */
+    struct sdshdr *sh = realloc(SDS_HDR(s),
+                                offsetof(struct sdshdr, buf) + newalloc + 1);
+    if (sh == NULL)
         oom("groupsds");
-    }
-    sh->alloc = newalloc;           /* len 在下面统一更新 */
-    s = sh->buf;
-    return s;
+
+    sh->alloc = newalloc;
+    return sh->buf;
 }
 sds sdscatlen(sds s, const void *t, size_t len)
 {
@@ -141,12 +146,8 @@ sds sdscatlen(sds s, const void *t, size_t len)
     }
 
     size_t target = sdslen(s) + len;    /* 追加后的新总长 */
-    if (sdsavail(s) < len) {            /* 现有空间不足,先扩容 */
-        s = groupsds(s, target);
-        if (s == NULL) {
-            oom("sdscatlen");
-        }
-    }
+    if (sdsavail(s) < len)              /* 现有空间不足,先扩容 */
+        s = groupsds(s, target);        /* 失败直接 oom,不会返回 NULL */
 
     /* 到这里保证 avail >= len:两个分支汇合,一条写路径 */
     memcpy(s + sdslen(s), t, len);
@@ -169,18 +170,38 @@ sds sdscat(sds s, const char *t)
 sds sdscpylen(sds s, const char *t, size_t len)
 {
     /* TODO: 覆盖式拷贝,丢弃 s 原内容
-     * 1. sdsavail(s) < len → 按 sdscatlen 第 3 步同款策略扩容
-     *    (此时 target = len,不需要旧长度);
+     * 1. alloc < len(Redis 同款 sdsalloc 判断)→ 按 sdscatlen 第 3 步
+     *    同款策略扩容(target = len,不需要旧长度)。注意不能用
+     *    sdsavail < len:覆盖从 s[0] 开始写,只要装得下就不该 realloc,
+     *    否则 groupsds 按 target 算 newalloc 反而会把 alloc 缩小;
      * 2. memmove(s, t, len) —— 必须用 memmove 而非 memcpy:
      *    t 允许指向 s 自身内部(原地改写,如 sdscpylen(s, s + 3, 5));
      * 3. len 置 len,buf[len] = '\0';alloc 不缩(复用原有空间);
      * 4. len == 0 时不解引用 t,效果等价 sdsclear;
      * 5. 返回(可能已迁移的)新 buf 地址。
      */
-    (void)s;
-    (void)t;
-    (void)len;
-    return NULL; /* TODO: 实现后删除占位 */
+    if (len == 0) {                 /* 不解引用 t,效果等价 sdsclear */
+        sdsclear(s);
+        return s;
+    }
+
+    /* t 指向 s 自身 buf 内部时,下面的 realloc 可能整块迁移,旧 t 随即悬空。
+     * 先记下偏移,迁移后重锚:realloc 会把旧内容原样搬到新块,偏移仍指向
+     * 同一段字节(t 落在 buf 可写区内即视为重叠) */
+    size_t t_off = (size_t)-1;
+    if (t >= s && t < s + SDS_HDR(s)->alloc)
+        t_off = (size_t)(t - s);
+
+    if (SDS_HDR(s)->alloc < len)    /* 物理容量装不下才扩;够则 alloc 不动、不缩 */
+        s = groupsds(s, len);
+
+    if (t_off != (size_t)-1)        /* 发生过迁移,按偏移重锚 t */
+        t = s + t_off;
+
+    memmove(s, t, len);             /* memmove 而非 memcpy:t 允许与 s 重叠 */
+    SDS_HDR(s)->len = len;
+    SDS_HDR(s)->buf[len] = '\0';
+    return s;
 }
 
 sds sdscpy(sds s, const char *t)
@@ -189,7 +210,9 @@ sds sdscpy(sds s, const char *t)
      * t == NULL → 等价 sdsclear(s) 后返回 s;
      * 否则委托 sdscpylen(s, t, strlen(t))。
      */
-    (void)s;
-    (void)t;
-    return NULL; /* TODO: 实现后删除占位 */
+    size_t len = 0;
+    if (t != NULL) {
+        len = strlen(t);
+    }
+    return sdscpylen(s, t, len); 
 }

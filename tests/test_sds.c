@@ -3,8 +3,10 @@
  * 验收标准:docs/development-plan.md M0 —— test_sds 全绿、零警告编译。
  * 覆盖:
  *   创建/复制/释放(含 NULL 与空串边界)、追加与覆盖(含二进制安全、
- *   自重叠、len==0)、预分配策略(小串翻倍/大串 +1MB)、惰性释放、
- *   尾部 '\0' 哨兵不变量、随机操作序列对照压测(固定种子可复现)。
+ *   自重叠——含跨 realloc 迁移、len==0)、预分配策略(小串翻倍/大串 +1MB,
+ *   含 1MB 边界精确值)、惰性释放(覆盖变短后复用、alloc 单调不缩)、
+ *   便捷入口容错(NULL/空串)、尾部 '\0' 哨兵不变量、
+ *   随机操作序列对照压测(固定种子可复现,含自重叠覆盖)。
  */
 
 #include <stdint.h>
@@ -202,6 +204,87 @@ static void test_cpylen(void)
     sdsfree(s);
 }
 
+/* ---- 覆盖拷贝补强 ---- */
+
+/* len == 0 不解引用 t(NULL 也不行);便捷版空串;等长覆盖不 realloc;
+ * t == s 零偏移自拷贝;覆盖变短后追加必须复用原有空间(alloc 不缩) */
+static void test_cpylen_edge(void)
+{
+    /* sdscpylen(s, NULL, 0):等价 sdsclear,不得解引用 t */
+    sds s = require(sdsnew("hello"), "sdsnew");
+    s = require(sdscpylen(s, NULL, 0), "sdscpylen");
+    CHECK(sdslen(s) == 0);
+    CHECK(s[0] == '\0');
+
+    /* sdscpy(s, ""):同样清空 */
+    s = require(sdscpy(s, ""), "sdscpy");
+    CHECK(sdslen(s) == 0);
+    CHECK(s[0] == '\0');
+
+    /* 等长覆盖:alloc 恰好装下(alloc == len),不得 realloc,总分配不变 */
+    s = require(sdscpy(s, "hello"), "sdscpy");
+    size_t total = sdslen(s) + sdsavail(s);
+    s = require(sdscpylen(s, "world", 5), "sdscpylen");
+    CHECK(sdslen(s) == 5);
+    CHECK(memcmp(s, "world", 5) == 0);
+    CHECK(s[5] == '\0');
+    CHECK(sdslen(s) + sdsavail(s) == total);
+
+    /* t == s:零偏移自拷贝,内容原样 */
+    s = require(sdscpylen(s, s, 5), "sdscpylen");
+    CHECK(sdslen(s) == 5);
+    CHECK(memcmp(s, "world", 5) == 0);
+    CHECK(s[5] == '\0');
+    sdsfree(s);
+
+    /* 覆盖变短后的空闲空间必须能被追加复用(惰性释放的第二种形态) */
+    s = require(sdsnew("hello world"), "sdsnew");      /* alloc=11 */
+    s = require(sdscpylen(s, "abc", 3), "sdscpylen");  /* len=3,avail=8 */
+    s = require(sdscat(s, "defghij"), "sdscat");       /* target=10<=alloc:复用 */
+    CHECK(sdslen(s) == 10);
+    CHECK(memcmp(s, "abcdefghij", 10) == 0);
+    CHECK(sdslen(s) + sdsavail(s) == 11);              /* 全程未 realloc */
+    sdsfree(s);
+}
+
+/* t 在自身 buf 内且扩容触发 realloc 迁移:t 不得悬垂(ASan/UBSan 兜底抓 UAF)。
+ * 锁定 sdscpylen 的"偏移重锚"修复:迁移后偏移仍指向同一段字节 */
+static void test_cpylen_overlap_realloc(void)
+{
+    static char big[3000];
+    memset(big, 'A', sizeof(big));
+
+    sds s = require(sdsnewlen(big, sizeof(big)), "sdsnewlen"); /* alloc=3000,avail=0 */
+    memset(s, 'B', 100);          /* 内容:前 100 字节 'B',其余 'A' */
+
+    /* 从偏移 2000(内容 'A')自拷贝 3500 字节:alloc 3000 < 3500 → 必然 realloc;
+     * 旧块 [2000..3000) 的 1000 个 'A' 随整块迁移,再被拷到新块头部 */
+    s = require(sdscpylen(s, s + 2000, 3500), "sdscpylen");
+    CHECK(sdslen(s) == 3500);
+    for (size_t i = 0; i < 1000; i++)
+        CHECK(s[i] == 'A');
+    CHECK(s[1000] == '\0');       /* 旧哨兵(偏移 3000)迁移后应落在 1000 */
+    CHECK(s[3500] == '\0');       /* 新哨兵 */
+    sdsfree(s);
+}
+
+/* 便捷入口的容错语义(锁定当前实现:超出头文件基本契约的宽容行为) */
+static void test_cat_null_empty(void)
+{
+    sds s = require(sdsnew("abc"), "sdsnew");
+    size_t total = sdslen(s) + sdsavail(s);
+
+    s = require(sdscat(s, NULL), "sdscat(NULL)");      /* 原样返回,不崩溃 */
+    CHECK(sdslen(s) == 3);
+    s = require(sdscat(s, ""), "sdscat(\"\")");        /* 空串:len/alloc 不变 */
+    CHECK(sdslen(s) == 3);
+    CHECK(sdslen(s) + sdsavail(s) == total);
+    CHECK(memcmp(s, "abc", 3) == 0);
+
+    CHECK(sdsdup(NULL) == NULL);                       /* 容错:返回 NULL */
+    sdsfree(s);
+}
+
 /* ---- 预分配策略 ---- */
 
 /* 创建恰好分配;小串扩容翻倍;越过 1MB 后改为每次 +1MB */
@@ -226,6 +309,36 @@ static void test_prealloc(void)
         s = require(sdscatlen(s, chunk, sizeof(chunk)), "sdscatlen");
     CHECK(sdslen(s) == 1100ul * 1024);
     CHECK(sdslen(s) + sdsavail(s) <= sdslen(s) + SDS_MAX_PREALLOC + 4096);
+    sdsfree(s);
+}
+
+/* 1MB 阈值两侧的精确值:锁定 groupsds 公式的严格 < 判断 ——
+ * target < 1M 翻倍(2*target),target >= 1M 改为 target + 1M。
+ * 用 sdsnewlen 构造精确 avail==0 的起点,排除历史分配的干扰 */
+static void test_prealloc_boundary(void)
+{
+    static char chunk[SDS_MAX_PREALLOC + 4096];
+    memset(chunk, 'x', sizeof(chunk));
+
+    /* target = 1M - 512:仍在翻倍区 → total == 2*target */
+    sds s = require(sdsnewlen(chunk, SDS_MAX_PREALLOC - 1024), "sdsnewlen");
+    s = require(sdscatlen(s, chunk, 512), "sdscatlen");
+    CHECK(sdslen(s) == SDS_MAX_PREALLOC - 512);
+    CHECK(sdslen(s) + sdsavail(s) == 2 * (SDS_MAX_PREALLOC - 512));
+    sdsfree(s);
+
+    /* target 恰 == 1M:不满足严格 <,走 +1MB 分支 → total == 2M */
+    s = require(sdsnewlen(chunk, SDS_MAX_PREALLOC - 512), "sdsnewlen");
+    s = require(sdscatlen(s, chunk, 512), "sdscatlen");
+    CHECK(sdslen(s) == SDS_MAX_PREALLOC);
+    CHECK(sdslen(s) + sdsavail(s) == 2 * (size_t)SDS_MAX_PREALLOC);
+    sdsfree(s);
+
+    /* 单次追加直接越过 1M:一步到位,不翻倍 → total == len + 1M */
+    s = require(sdsempty(), "sdsempty");
+    s = require(sdscatlen(s, chunk, sizeof(chunk)), "sdscatlen");
+    CHECK(sdslen(s) == sizeof(chunk));
+    CHECK(sdslen(s) + sdsavail(s) == sizeof(chunk) + SDS_MAX_PREALLOC);
     sdsfree(s);
 }
 
@@ -268,32 +381,41 @@ static void test_stress(void)
 {
     static char ref[1 << 17];
     size_t ref_len = 0;
+    size_t prev_total = 0;      /* 上轮 len+alloc,用于检查 alloc 单调不缩 */
     sds s = require(sdsempty(), "sdsempty");
 
     for (int iter = 0; iter < 3000; iter++) {
         uint32_t op = rng() % 100;
-        if (op < 55 || ref_len == 0) {
+        if (op < 50 || ref_len == 0) {
             /* 追加 1~200 个随机字节(可含 '\0') */
             size_t n = rng() % 200 + 1;
             for (size_t i = 0; i < n; i++)
                 ref[ref_len + i] = (char)(rng() & 0xff);
             s = require(sdscatlen(s, ref + ref_len, n), "sdscatlen");
             ref_len += n;
-        } else if (op < 80) {
+        } else if (op < 75) {
             /* 覆盖为随机长度:变长/变短都可能触发扩容 */
             ref_len = rng() % 512 + 1;
             for (size_t i = 0; i < ref_len; i++)
                 ref[i] = (char)(rng() & 0xff);
             s = require(sdscpylen(s, ref, ref_len), "sdscpylen");
-        } else if (op < 90) {
+        } else if (op < 85) {
             /* 清空(惰性释放)后再继续用 */
             ref_len = 0;
             sdsclear(s);
-        } else {
+        } else if (op < 92) {
             /* C 串便捷入口 */
             memcpy(ref + ref_len, "hello", 5);
             s = require(sdscat(s, "hello"), "sdscat");
             ref_len += 5;
+        } else {
+            /* 自重叠覆盖:t 取自身 buf 中段,memmove 语义原地改写;
+             * 偏移/长度随机组合,可命中"需要扩容"的迁移重锚路径 */
+            size_t k = rng() % ref_len;
+            size_t n = rng() % (ref_len - k) + 1;
+            memmove(ref, ref + k, n);
+            ref_len = n;
+            s = require(sdscpylen(s, s + k, n), "sdscpylen(overlap)");
         }
 
         /* 每轮全量对照 */
@@ -306,6 +428,11 @@ static void test_stress(void)
             ref_len = rng() % 1024;
             s = require(sdscpylen(s, ref, ref_len), "sdscpylen");
         }
+
+        /* alloc 全程单调不缩:任何操作都不得释放已分配空间(惰性释放) */
+        size_t total = sdslen(s) + sdsavail(s);
+        CHECK(total >= prev_total);
+        prev_total = total;
     }
     sdsfree(s);
 }
@@ -319,7 +446,11 @@ int main(void)
     test_catlen();
     test_cat_realloc_chain();
     test_cpylen();
+    test_cpylen_edge();
+    test_cpylen_overlap_realloc();
+    test_cat_null_empty();
     test_prealloc();
+    test_prealloc_boundary();
     test_binary_roundtrip();
     test_stress();
     printf("test_sds: all checks passed\n");
